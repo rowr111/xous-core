@@ -29,17 +29,17 @@
 
 ## How Apps Talk
 - Apps and services send messages to each other. Messages are small and fast.
-- To find a service, you ask a well-known phonebook called `xous-names`.
-- Core helpers you will use first: `log-server` (printing logs), `ticktimer` (sleep/elapsed time), `bao1x-hal-service` (safe hardware access), `xous-names` (lookup).
-- As an app author you typically just call these helpers’ Rust APIs; they send the messages under the hood. You only hand-roll message loops if you are creating a brand-new service yourself.
+- How services get found:
+  - Some core helpers have fixed SIDs and skip lookup: `log-server` and `ticktimer` connect directly.
+  - Everything else goes through the phonebook (`xous-names`). Typical flow: create `let xns = XousNames::new()?;` once and pass `&xns` into helpers (GAM, HAL, modals, etc.)—they look up the service name for you. You only call `xous-names` yourself when you’re creating a new service and need to register its name, or when you’re experimenting with raw message passing instead of using a client crate.
 
 ## When Multiple Apps Call the Same Service
 - Each service has a mailbox (Xous calls it a "server queue"). Apps drop messages in; the kernel delivers them.
-- Each app also has its own return mailbox for replies. The service pulls from its queue one message at a time and replies to the sender’s mailbox.
-- Because access goes through a single service, it can keep hardware sane (no two apps toggling the same device at once) and can say “no” if a request isn’t allowed.
+- Each app also has its own return mailbox for replies. The service pulls from its queue one message at a time and replies to the sender's mailbox.
+- Because access goes through a single service, it can keep hardware sane (no two apps toggling the same device at once) and can say "no" if a request isn't allowed.
 
-## What the bao1x-hal-service (Hardware Abstraction Layer aka HAL) Does
-- Hardware here means both on-chip blocks (timers, clocks, USB, watchdog) and off-chip parts you reach through pins/buses (GPIOs, I2C/SPI devices, buttons, display, camera).
-- The HAL owns those slots. You ask it to “do X” in Rust; it picks the right register and bits so you never touch raw addresses.
-- This keeps the chip safe (no two apps fighting over pins) and makes hardware use approachable if you aren’t a hardware person.
-- Example uses: set a GPIO pin high/low, read a button, start or stop I2C/SPI transactions, kick the watchdog, or configure clocks—without ever touching chip registers yourself.
+## Want per-service details and sample code? See the [Baochip services guide](./services-guide.md).
+
+## What About Libraries?
+- The `libs/` directory holds various helpful shared Rust crates (no `main`) you pull into services or apps as dependencies. They do not run on their own.
+- Use them like any Rust library: add the crate to your `Cargo.toml`, `use` its modules, call its APIs.
