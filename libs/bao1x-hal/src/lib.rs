@@ -33,17 +33,20 @@ pub mod acram;
 #[cfg(not(feature = "hosted-baosec"))]
 pub mod buram;
 #[cfg(not(feature = "hosted-baosec"))]
+pub mod clocks;
+#[cfg(not(feature = "hosted-baosec"))]
 pub mod coreuser;
+#[cfg(all(not(feature = "hosted-baosec"), not(feature = "kernel")))]
+pub mod hardening;
 #[cfg(all(not(feature = "hosted-baosec"), feature = "std"))]
 pub mod kpc_aoint;
 #[cfg(not(feature = "hosted-baosec"))]
 pub mod mbox;
 #[cfg(not(feature = "hosted-baosec"))]
 pub mod rram;
-// no signature checking in the kernel
 #[cfg(not(feature = "hosted-baosec"))]
 pub mod rtc;
-#[cfg(all(not(feature = "hosted-baosec"), not(feature = "kernel"),))]
+#[cfg(all(not(feature = "hosted-baosec"), not(feature = "kernel")))]
 pub mod sigcheck;
 #[cfg(not(feature = "hosted-baosec"))]
 pub mod sram_trim;

@@ -60,6 +60,11 @@ pub const CP_COOKIE: SlotIndex = SlotIndex::Data(258, PartitionAccess::Fw0, RwPe
 /// The swap encryption key. Used to protect swap images beyond the signing key, if we so desire.
 pub const SWAP_KEY: SlotIndex = SlotIndex::Data(259, PartitionAccess::Fw0, RwPerms::ReadWrite);
 
+/// A test value placed by FT into the memory array. If you can read the original value, you've captured a
+/// flag!
+/// There is a second flag stored somewhere else. Can you find it?
+pub const THE_FLAG_1: SlotIndex = SlotIndex::Data(260, PartitionAccess::Fw0, RwPerms::ReadWrite);
+
 /// `NUISANCE_KEYS` are hashed together with `ROOT_SEED` to derive the core secret.
 /// Their primary purpose is to annoy microscopists trying to read the secret key by
 /// directly imaging the RRAM array. They also exist to reduce power side channels
@@ -111,6 +116,19 @@ pub const NUISANCE_KEYS: [SlotIndex; 2] = [NUISANCE_KEYS_0, NUISANCE_KEYS_1];
 /// running your own code on the device).
 pub const CHAFF_KEYS: SlotIndex = SlotIndex::DataRange(128..256, PartitionAccess::Fw0, RwPerms::ReadWrite);
 
+/// This is intentionally the very last key in the chaff key range. It's "sampled" by copying
+/// the full value of this key into the BURAM, which is later passed on to the loader. It's then
+/// checked for a value being equal to the erasure value to confirm that a device is in developer
+/// mode or not. This process does introduce a risk that this one key is leaked but it also
+/// closes a loophole where an attacker can simply manipulate the value of the DEVELOPER_KEY
+/// one way counter and fool the system into running a developer-key signed image without the
+/// secret keys being erased.
+///
+/// Placing this at the end of the key array ostensibly means that all the keys before it were
+/// erased; it might be possible to glitch all the way to the end and just have this one erased
+/// but I think that is reasonably unlikely...
+pub const ERASE_PROOF: SlotIndex = SlotIndex::Data(256, PartitionAccess::Fw0, RwPerms::ReadWrite);
+
 /// All the slots of concern located in a single iterator. The idea is that everything is
 /// condensed here and used to check for access integrity using the array below.
 pub const DATA_SLOTS: [SlotIndex; 8] = [
@@ -126,5 +144,5 @@ pub const DATA_SLOTS: [SlotIndex; 8] = [
 
 /// In addition to these KEY_SLOTS, the DEVELOPER_MODE one way counter is a security-important parameter
 /// that should be included as domain separation in any KDF.
-pub const KEY_SLOTS: [SlotIndex; 6] =
-    [CP_COOKIE, RMA_KEY, ROOT_SEED, NUISANCE_KEYS_0, NUISANCE_KEYS_1, CHAFF_KEYS];
+pub const KEY_SLOTS: [SlotIndex; 7] =
+    [THE_FLAG_1, CP_COOKIE, RMA_KEY, ROOT_SEED, NUISANCE_KEYS_0, NUISANCE_KEYS_1, CHAFF_KEYS];
