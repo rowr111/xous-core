@@ -3,6 +3,7 @@ import os
 import contextlib
 import logging
 import threading
+import time
 from serial.serialutil import SerialException
 from utils.serial_utils import open_serial, safe_close
 
@@ -120,6 +121,8 @@ def cmd_monitor(args) -> None:
     print(f"[bao] TX:{mode}  Echo:{echo}")
 
     consecutive_errors = 0
+    MAX_ERRORS = 15       # tolerate brief USB/UART glitches during firmware init
+    RETRY_SLEEP_S = 0.05  # pause between error retries to avoid a hot error loop
     stop_event = threading.Event()
 
     # Start stdin→serial writer thread
@@ -139,13 +142,14 @@ def cmd_monitor(args) -> None:
                 consecutive_errors = 0
             except SerialException as e:
                 consecutive_errors += 1
-                logging.warning(f"[bao] Serial error: {e}. Retrying ({consecutive_errors}/3)...")
-                if consecutive_errors >= 3:
-                    logging.error("[bao] Giving up. Check that no other program is using the port.")
+                logging.debug(f"[bao] Serial error ({consecutive_errors}/{MAX_ERRORS}): {e}")
+                if consecutive_errors >= MAX_ERRORS:
+                    logging.error("[bao] Too many serial errors — port may be disconnected.")
                     break
+                time.sleep(RETRY_SLEEP_S)
+                continue
             # Small yield to avoid a hot loop when idle
             if not stop_event.is_set():
-                import time
                 time.sleep(0.01)
     except KeyboardInterrupt:
         pass
