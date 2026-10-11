@@ -10,6 +10,17 @@ const TIMEOUT_ITERS: usize = 1_000_000;
 #[cfg(feature = "hdl-test")]
 const TIMEOUT_ITERS: usize = 5000;
 
+// A transfer takes a few ms at most, so one still running after this is a stuck bus.
+#[cfg(feature = "std")]
+const AWAIT_TIMEOUT_MS: u64 = 50;
+
+// Register polls between checks of the clock.
+#[cfg(feature = "std")]
+const AWAIT_CHECK_POLLS: usize = 1_000;
+
+// Polls to wait for an enqueued command list to start executing.
+const PROPAGATE_ITERS: usize = 10_000;
+
 // MPW had this register:
 //        pub const REG_SETUP: crate::Register = crate::Register::new(13, 0x1);
 //        pub const REG_SETUP_R_DO_RST: crate::Field = crate::Field::new(1, 0, REG_SETUP);
@@ -88,6 +99,9 @@ pub struct I2cDriver<'a> {
     cmd_buf_phys: &'static mut [u32],
     seq_len: usize,
     pending: I2cPending,
+    // Kept here because a new connection per transfer would leak server connections.
+    #[cfg(feature = "std")]
+    tt: xous_api_ticktimer::Ticktimer,
 }
 
 impl Udma for I2cDriver<'_> {
@@ -201,6 +215,8 @@ impl<'a> I2cDriver<'a> {
             pending: I2cPending::Idle,
             perclk_freq,
             i2c_freq,
+            #[cfg(feature = "std")]
+            tt: xous_api_ticktimer::Ticktimer::new().expect("couldn't connect to ticktimer"),
         };
         i2c.send_cmd_list(&[I2cCmd::Config(divider)]);
         i2c
@@ -217,7 +233,7 @@ impl<'a> I2cDriver<'a> {
         self.set_freq(self.i2c_freq);
     }
 
-    // always blocks
+    // blocks until the list is taken up, or PROPAGATE_ITERS expires
     fn send_cmd_list(&mut self, cmds: &[I2cCmd]) {
         assert!(cmds.len() < MAX_I2C_CMDLEN);
         for (cmd, dst) in cmds.iter().zip(self.cmd_buf.iter_mut()) {
@@ -228,7 +244,14 @@ impl<'a> I2cDriver<'a> {
         unsafe {
             self.udma_enqueue(Bank::Custom, &self.cmd_buf_phys[..cmds.len()], CFG_EN);
         }
-        while self.udma_busy(Bank::Custom) {}
+        // Bounded, because reset() calls this and must not hang.
+        let mut iters = 0;
+        while self.udma_busy(Bank::Custom) {
+            iters += 1;
+            if iters > PROPAGATE_ITERS {
+                break;
+            }
+        }
     }
 
     fn push_cmd(&mut self, cmd: I2cCmd) {
@@ -240,10 +263,25 @@ impl<'a> I2cDriver<'a> {
 
     /// Returns a ShareViolation if the pending operation is a read, but `rx_buf` is `None`.
     pub fn i2c_await(&mut self, rx_buf: Option<&mut [u8]>, _use_yield: bool) -> Result<usize, xous::Error> {
+        // A yield takes an unknown time, so with std the wait is bounded by the clock too.
+        #[cfg(feature = "std")]
+        let deadline = self.tt.elapsed_ms() + AWAIT_TIMEOUT_MS;
         let mut timeout = 0;
         while self.busy() {
             timeout += 1;
-            if timeout > TIMEOUT_ITERS {
+            // Reading the clock and yielding are both IPCs, so they are not done on every poll.
+            #[cfg(feature = "std")]
+            let expired = if timeout % AWAIT_CHECK_POLLS == 0 {
+                if _use_yield {
+                    xous::yield_slice();
+                }
+                self.tt.elapsed_ms() > deadline
+            } else {
+                false
+            };
+            #[cfg(not(feature = "std"))]
+            let expired = false;
+            if expired || timeout > TIMEOUT_ITERS {
                 // reset the block
                 self.udma_reset(Bank::Custom);
                 self.udma_reset(Bank::Tx);
@@ -268,10 +306,6 @@ impl<'a> I2cDriver<'a> {
                 self.send_cmd_list(&[I2cCmd::Config(self.divider)]);
                 self.pending.take();
                 return Err(xous::Error::Timeout);
-            }
-            #[cfg(feature = "std")]
-            if _use_yield {
-                xous::yield_slice();
             }
         }
         let nack_bits = self.udma_global.irq_status_bits(IrqBank::I2cErr);
@@ -380,6 +414,26 @@ impl<'a> I2cDriver<'a> {
             || self.udma_busy(Bank::Rx)
     }
 
+    /// Waits for an enqueued command list to start executing. On false it never did, and the
+    /// caller must reset and report a failure.
+    fn await_cmd_start(&self) -> bool {
+        let mut iters = 0;
+        loop {
+            #[cfg(not(feature = "mpw"))]
+            let starting = self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0
+                || self.csr.rf(utra::udma_i2c_0::REG_CMD_SIZE_R_CMD_SIZE) != 0;
+            #[cfg(feature = "mpw")]
+            let starting = self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0;
+            if !starting {
+                return true;
+            }
+            iters += 1;
+            if iters > PROPAGATE_ITERS {
+                return false;
+            }
+        }
+    }
+
     /// Basically, does a read from an I2C address without specifying a register. The protocol
     /// would not make sense for any real-world application, but it is an MVP than exercises
     /// both a write (to specify the device address) and a read (the response data) form of
@@ -430,12 +484,10 @@ impl<'a> I2cDriver<'a> {
             self.udma_enqueue(Bank::Custom, &self.cmd_buf_phys[..self.seq_len], CFG_EN);
         }
         // wait for the commands to propagate before returning
-        #[cfg(not(feature = "mpw"))]
-        while self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0
-            || self.csr.rf(utra::udma_i2c_0::REG_CMD_SIZE_R_CMD_SIZE) != 0
-        {}
-        #[cfg(feature = "mpw")]
-        while self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0 {}
+        if !self.await_cmd_start() {
+            self.reset();
+            return Err(xous::Error::Timeout);
+        }
         self.pending = I2cPending::Write(data.len());
         Ok(data.len())
     }
@@ -495,12 +547,10 @@ impl<'a> I2cDriver<'a> {
             self.udma_enqueue(Bank::Custom, &self.cmd_buf_phys[..self.seq_len], CFG_EN);
         }
         // wait for the commands to propagate before returning
-        #[cfg(not(feature = "mpw"))]
-        while self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0
-            || self.csr.rf(utra::udma_i2c_0::REG_CMD_SIZE_R_CMD_SIZE) != 0
-        {}
-        #[cfg(feature = "mpw")]
-        while self.csr.rf(utra::udma_i2c_0::REG_STATUS_R_BUSY) == 0 {}
+        if !self.await_cmd_start() {
+            self.reset();
+            return Err(xous::Error::Timeout);
+        }
         self.pending = I2cPending::Read(len);
         Ok(len)
     }
